@@ -916,7 +916,7 @@ async function loginStandalone(options, login = loginWithQr) {
     const ref = credentialRef(options.credentialRef);
     const info = await ctx.credentials.describe(ref);
     if (!info.writable) {
-      throw new Error(`\u51ED\u636E ${options.credentialRef} \u7531\u542F\u52A8\u73AF\u5883\u63D0\u4F9B\uFF0C\u65E0\u6CD5\u88AB\u767B\u5F55\u547D\u4EE4\u8986\u76D6`);
+      throw new Error(`\u51ED\u636E ${options.credentialRef} \u4E0D\u53EF\u5199\uFF0C\u65E0\u6CD5\u88AB\u767B\u5F55\u547D\u4EE4\u8986\u76D6`);
     }
     const existing = await ctx.credentials.resolve(ref);
     const existingTokens = existing === void 0 ? [] : credentialTokens(existing.value);
@@ -965,4 +965,4 @@ export {
   displayQr,
   loginStandalone
 };
-//# sourceMappingURL=chunk-KCZ7FGE3.js.map
+//# sourceMappingURL=chunk-KXS44R2N.js.map

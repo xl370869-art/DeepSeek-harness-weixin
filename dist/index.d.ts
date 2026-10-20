@@ -260,8 +260,9 @@ declare function parseApprovalCommand(text: string): ApprovalCommand | 'invalid'
 /** Owns the short-lived mapping between Harness approval requests and Weixin reply commands. */
 declare class WeixinApprovalRegistry {
     private readonly timeoutMs;
+    private readonly context?;
     private readonly pending;
-    constructor(timeoutMs: number);
+    constructor(timeoutMs: number, context?: Context | undefined);
     /** Ask one Weixin user and await a one-shot Harness approval outcome. */
     request(conversationId: string, request: ApprovalRequest, sendPrompt: (text: string) => Promise<void>): Promise<ApprovalOutcome>;
     /** Resolve a pending request only when the command came from its originating conversation. */
@@ -273,7 +274,7 @@ declare class WeixinApprovalRegistry {
     private createCode;
 }
 /** Render the exact structured tool call linked by the approval request when available. */
-declare function formatApprovalPrompt(request: ApprovalRequest, code: string, timeoutMs: number): string;
+declare function formatApprovalPrompt(request: ApprovalRequest, code: string, timeoutMs: number, context?: Context): Promise<string>;
 
 /** One workspace file materialized for a Weixin upload. */
 interface OutboundFile {
@@ -287,6 +288,15 @@ interface OutboundFileCollection {
 }
 /** Resolve final-answer file links into bounded bytes that can be uploaded by Weixin. */
 declare function collectOutboundFiles(text: string, cwd: string, maxFiles: number, maxFileBytes: number): Promise<OutboundFileCollection>;
+
+declare module '@deepseek-ai/dsh-llm' {
+    interface MessageSourceMap {
+        'deepseek-harness-weixin': {
+            kind: 'deepseek-harness-weixin';
+            form: 'instructions';
+        };
+    }
+}
 
 /** Completed response from one Weixin-triggered Harness turn. */
 interface ConversationReply {

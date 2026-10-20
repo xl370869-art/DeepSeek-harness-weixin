@@ -1,4 +1,4 @@
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm/brand'
 import { describe, expect, it, vi } from 'vitest'
 import {
   formatApprovalPrompt,
@@ -21,7 +21,11 @@ function request(options: { command?: string; reason?: string; signal?: AbortSig
         },
       }]
   return {
-    agent: { session: { events } },
+    agent: { session: { id: 'approval-session' }, ctx: {
+      sessionQuery: { observeSession: async () => ({
+        header: {}, events, [Symbol.dispose]: vi.fn(),
+      }) },
+    } },
     toolName: 'bash',
     callId,
     ...(options.reason === undefined ? {} : { reason: options.reason }),
@@ -38,8 +42,8 @@ describe('Weixin approval commands', () => {
     expect(parseApprovalCommand('ordinary message')).toBeUndefined()
   })
 
-  it('renders the command from the structured tool/call linked by call id', () => {
-    const prompt = formatApprovalPrompt(request({ command: 'ls -la' }), '123456', 240_000)
+  it('renders the command from the structured tool/call linked by call id', async () => {
+    const prompt = await formatApprovalPrompt(request({ command: 'ls -la' }), '123456', 240_000)
     expect(prompt).toBe([
       'Bash 请求执行：ls -la',
       '回复 /approve 123456 或 /reject 123456',
@@ -103,5 +107,26 @@ describe('Weixin approval commands', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+
+describe('asynchronous approval preview', () => {
+  it('cancels before a slow observation resolves and does not send stale prompts', async () => {
+    const controller = new AbortController()
+    const query = Promise.withResolvers<unknown>()
+    const release = vi.fn()
+    const send = vi.fn(async () => undefined)
+    const registry = new WeixinApprovalRegistry(120_000)
+    const pending = registry.request('slow-query', {
+      agent: { session: { id: 'slow-query' },
+        ctx: { sessionQuery: { observeSession: () => query.promise } } },
+      toolName: 'bash', callId: 'slow-call', signal: controller.signal,
+    } as never, send)
+    controller.abort()
+    await expect(pending).resolves.toBe('cancelled')
+    query.resolve({ header: {}, events: [], [Symbol.dispose]: release })
+    await vi.waitFor(() => expect(release).toHaveBeenCalledOnce())
+    expect(send).not.toHaveBeenCalled()
   })
 })

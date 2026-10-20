@@ -48,7 +48,7 @@ describe('ConversationManager', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'deepseek', model: 'deepseek-chat' },
-      session: { events },
+      session: { events, id: 'session-test', get seq() { return events.length } },
       ctx: approvalScope(),
       inject: vi.fn(),
       followup: vi.fn((userMessage: { id: string }) => appendTextTurn(events, userMessage, 'hello weixin')),
@@ -56,13 +56,16 @@ describe('ConversationManager', () => {
     }
     const dispose = vi.fn(async () => undefined)
     const mount = vi.fn(async () => ({ id: 'standard' }))
-    const create = vi.fn(async (options: { setup?: (ctx: never) => Promise<void> }) => {
-      await options.setup?.({ agent } as never)
+    const create = vi.fn(async (options: { setup?: (ctx: never, agent: never) => Promise<void> }) => {
+      await options.setup?.({} as never, agent as never)
       return { agent, dispose }
     })
     const setPermission = vi.fn()
     const resolvePermission = vi.fn(() => ({ sandbox: 'danger-full-access', approval: 'never' }))
     const ctx = {
+      sessionQuery: { observeSession: vi.fn(async () => ({
+        header: {}, events: [...agent.session.events], [Symbol.dispose]: vi.fn(),
+      })) },
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })) },
       agentPresets: { defaultId: 'standard', mount },
@@ -102,7 +105,7 @@ describe('ConversationManager', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'deepseek', model: 'deepseek-chat' },
-      session: { events },
+      session: { events, id: 'session-test', get seq() { return events.length } },
       ctx: approvalScope(),
       inject: vi.fn(),
       followup: vi.fn((userMessage: { id: string }) => appendTextTurn(events, userMessage, 'resumed reply')),
@@ -110,13 +113,14 @@ describe('ConversationManager', () => {
     }
     const dispose = vi.fn(async () => undefined)
     const mount = vi.fn(async () => ({ id: 'minimal' }))
-    const resume = vi.fn(async (options: { setup?: (ctx: never) => Promise<void> }) => {
-      await options.setup?.({} as never)
+    const resume = vi.fn(async (options: { setup?: (ctx: never, agent: never) => Promise<void> }) => {
+      await options.setup?.({} as never, agent as never)
       return { agent, dispose }
     })
     const inspect = vi.fn(async () => ({
-      meta: { version: 0, id, createdAt: 1, cwd: '/tmp/weixin-test', agentPreset: 'standard' },
-      events: [{
+      header: { version: 0, id, createdAt: 1, cwd: '/tmp/weixin-test', agentPreset: 'standard' },
+      [Symbol.dispose]: vi.fn(),
+      events: resume.mock.calls.length > 0 ? [...events] : [{
         type: 'agent-preset/selected',
         seq: 0,
         time: 1,
@@ -124,7 +128,8 @@ describe('ConversationManager', () => {
       }],
     }))
     const ctx = {
-      sessionPersistence: { list: vi.fn(async () => [{ id }]), inspect },
+      sessionQuery: { observeSession: inspect },
+      sessionPersistence: { list: vi.fn(async () => [{ header: { id } }]), inspect },
       agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })) },
       agentPresets: { defaultId: 'standard', mount },
       agents: { create: vi.fn(), resume, get: vi.fn() },
@@ -137,7 +142,7 @@ describe('ConversationManager', () => {
     await expect(manager.process(message, { downloadImage: vi.fn() } as never))
       .resolves.toEqual({ text: 'resumed reply', images: [], files: [] })
 
-    expect(inspect).toHaveBeenCalledWith(id)
+    expect(inspect).toHaveBeenCalledWith(id, { projectionMode: 'none' })
     expect(resume).toHaveBeenCalledWith(expect.objectContaining({ setup: expect.any(Function) }))
     expect(mount).toHaveBeenCalledWith(expect.anything(), 'minimal')
     expect(agent.inject).not.toHaveBeenCalled()
@@ -152,19 +157,22 @@ describe('ConversationManager', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'deepseek', model: 'deepseek-chat' },
-      session: { events },
+      session: { events, id: 'session-test', get seq() { return events.length } },
       ctx: approvalScope(),
       followup: vi.fn((userMessage: { id: string }) => appendTextTurn(events, userMessage, 'fallback reply')),
       whenIdle: vi.fn(async () => undefined),
     }
     const mount = vi.fn(async () => ({ id: 'code' }))
-    const resume = vi.fn(async (options: { setup?: (ctx: never) => Promise<void> }) => {
-      await options.setup?.({} as never)
+    const resume = vi.fn(async (options: { setup?: (ctx: never, agent: never) => Promise<void> }) => {
+      await options.setup?.({} as never, agent as never)
       return { agent, dispose: vi.fn(async () => undefined) }
     })
     const ctx = {
+      sessionQuery: { observeSession: vi.fn(async () => ({
+        header: {}, events: [...agent.session.events], [Symbol.dispose]: vi.fn(),
+      })) },
       sessionPersistence: {
-        list: vi.fn(async () => [{ id }]),
+        list: vi.fn(async () => [{ header: { id } }]),
         inspect: vi.fn(async () => ({
           meta: { version: 0, id, createdAt: 1, cwd: '/tmp/weixin-test' },
           events: [],
@@ -194,7 +202,7 @@ describe('ConversationManager', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'deepseek', model: 'deepseek-chat' },
-      session: { events },
+      session: { events, id: 'session-test', get seq() { return events.length } },
       ctx: approvalScope(),
       followup: vi.fn((userMessage: { id: string }) => { submitted = userMessage }),
       whenIdle: vi.fn(async () => {
@@ -213,7 +221,10 @@ describe('ConversationManager', () => {
     const create = vi.fn()
     const mount = vi.fn()
     const ctx = {
-      sessionPersistence: { list: vi.fn(async () => [{ id }]), inspect },
+      sessionQuery: { observeSession: vi.fn(async () => ({
+        header: {}, events: [...agent.session.events], [Symbol.dispose]: vi.fn(),
+      })) },
+      sessionPersistence: { list: vi.fn(async () => [{ header: { id } }]), inspect },
       agentDefaultModel: { currentSelection: vi.fn() },
       agentPresets: { defaultId: 'standard', mount },
       agents: { get: vi.fn(() => agent), resume, create },
@@ -249,7 +260,7 @@ describe('ConversationManager', () => {
     const agent = {
       status: 'idle',
       options: { provider: 'deepseek', model: 'deepseek-chat' },
-      session: { events },
+      session: { events, id: 'session-test', get seq() { return events.length } },
       ctx: { on },
       followup: vi.fn((message: { id: string }) => { submitted = message }),
       whenIdle: vi.fn(async () => {
@@ -261,6 +272,9 @@ describe('ConversationManager', () => {
       }),
     }
     const ctx = {
+      sessionQuery: { observeSession: vi.fn(async () => ({
+        header: {}, events: [...agent.session.events], [Symbol.dispose]: vi.fn(),
+      })) },
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })) },
       agentPresets: { defaultId: 'standard', mount: vi.fn() },
@@ -312,6 +326,9 @@ describe('ConversationManager', () => {
       }),
     }
     const ctx = {
+      sessionQuery: { observeSession: vi.fn(async () => ({
+        header: {}, events: [...agent.session.events], [Symbol.dispose]: vi.fn(),
+      })) },
       sessionPersistence: { list: vi.fn(async () => []) },
       agentDefaultModel: { currentSelection: vi.fn(() => ({ provider: 'deepseek', model: 'deepseek-chat' })) },
       agentPresets: { defaultId: 'standard', mount: vi.fn() },

@@ -31,7 +31,7 @@ export async function loginStandalone(
     const ref = credentialRef(options.credentialRef)
     const info = await ctx.credentials.describe(ref)
     if (!info.writable) {
-      throw new Error(`凭据 ${options.credentialRef} 由启动环境提供，无法被登录命令覆盖`)
+      throw new Error(`凭据 ${options.credentialRef} 不可写，无法被登录命令覆盖`)
     }
     const existing = await ctx.credentials.resolve(ref)
     const existingTokens = existing === undefined ? [] : credentialTokens(existing.value)

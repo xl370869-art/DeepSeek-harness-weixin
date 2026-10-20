@@ -29,7 +29,7 @@
 
 - Node.js 22.19 或更高版本
 - pnpm 10.33.4
-- DeepSeek Harness 0.1.0-rc.7 或更高版本
+- DeepSeek Harness 0.2.1-rc.2 或更高版本
 
 ## 前置条件：ClawBot 权限
 
@@ -46,7 +46,7 @@
 直接从 GitHub 安装到 `web` profile（以下假设 `dsh` 已加入全局 `PATH`）：
 
 ```sh
-dsh plugin --profile web add github:sliverp/DeepSeek-harness-weixin
+dsh plugin --profile web add github:xl370869-art/DeepSeek-harness-weixin#v0.2.6-dsh.1
 ```
 
 安装只会更新 profile。服务尚未运行时用下面的命令启动；已经运行则重启：

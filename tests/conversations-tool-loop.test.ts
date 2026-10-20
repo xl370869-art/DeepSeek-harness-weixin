@@ -1,9 +1,16 @@
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm/brand'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import { readSessionEvents } from '../src/session-read.js'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import {
-  CallId,
   LlmAdapter,
   type GenerateOptions,
   type LlmResolvedModelInfo,
@@ -11,20 +18,25 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import SessionStore, {
-  Session,
   SessionId,
-  SessionPreparation,
-  type SessionEvent,
-  type SessionHeader,
 } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConversationManager } from '../src/conversations.js'
 import { MessageItemType } from '../src/types.js'
 import { sessionIdFor } from '../src/util.js'
 import { testConfig } from './fixtures.js'
+
+class ObservedSessionQuery extends SessionQueryEngine {
+  override async searchSessions(): Promise<never> { throw new Error('search is outside this test') }
+  override async searchEvents(): Promise<never> { throw new Error('search is outside this test') }
+}
+const storageRoots: string[] = []
+afterEach(async () => {
+  for (const root of storageRoots.splice(0)) await rm(root, { recursive: true, force: true })
+})
 
 const DSML_TOOL_CALLS = '<｜｜DSML｜｜tool_calls>'
 const DSML_INVOKE = '<｜｜DSML｜｜invoke'
@@ -93,11 +105,16 @@ class ScriptedAdapter extends LlmAdapter {
   }
 }
 
-async function toolHarness(adapter: ScriptedAdapter, persistence: object) {
+async function toolHarness(adapter: ScriptedAdapter) {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, { persona: '' })
+  await ctx.plugin(SessionProjectionRegistry)
+  await ctx.plugin(ObservedSessionQuery)
+  const root = await mkdtemp(join(tmpdir(), 'dsh-weixin-persistence-'))
+  storageRoots.push(root)
+  await ctx.plugin(JsonlSessionPersistence, { root, compression: 'none' })
+  await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(ApprovalService)
   await ctx.plugin(ToolRuntime)
@@ -137,7 +154,6 @@ async function toolHarness(adapter: ScriptedAdapter, persistence: object) {
     currentSelection: () => ({ provider: 'mock', model: 'mock' }),
   } as never)
   ctx.provide('agentPresets', { defaultId: 'standard', mount } as never)
-  ctx.provide('sessionPersistence', persistence as never)
   ctx.provide('attachments', {
     imageLimits: { maxImagesPerMessage: 4, maxMessageImageBytes: 10_000, maxImageBytes: 10_000 },
   } as never)
@@ -152,7 +168,7 @@ async function toolHarness(adapter: ScriptedAdapter, persistence: object) {
 describe('ConversationManager real Agent Loop', () => {
   it('executes registered slash commands through Harness without a model request', async () => {
     const adapter = new ScriptedAdapter([])
-    const { ctx } = await toolHarness(adapter, { list: () => Promise.resolve([]) })
+    const { ctx } = await toolHarness(adapter)
     const message = {
       from_user_id: 'command-user',
       item_list: [{ type: MessageItemType.TEXT, text_item: { text: '/probe exact' } }],
@@ -168,7 +184,7 @@ describe('ConversationManager real Agent Loop', () => {
 
       const agent = ctx.agents.get(SessionId(sessionIdFor('account-1', message)))
       if (agent === undefined) throw new Error('expected a live command integration-test Agent')
-      const commandEvents = agent.session.events.filter(event =>
+      const commandEvents = (await readSessionEvents(ctx, agent.session.id)).filter(event =>
         event.type === 'command/run' || event.type === 'command/done')
       expect(commandEvents.map(event => event.type)).toEqual(['command/run', 'command/done'])
       expect(commandEvents[0]).toMatchObject({
@@ -183,7 +199,7 @@ describe('ConversationManager real Agent Loop', () => {
 
       await expect(manager.executeCommand(message, '/missing', { downloadImage: vi.fn() } as never))
         .resolves.toEqual({ kind: 'unknown', available: ['/probe'] })
-      expect(agent.session.events.filter(event =>
+      expect((await readSessionEvents(ctx, agent.session.id)).filter(event =>
         event.type === 'command/run' || event.type === 'command/done')).toHaveLength(2)
       expect(adapter.requests).toHaveLength(0)
     } finally {
@@ -198,23 +214,7 @@ describe('ConversationManager real Agent Loop', () => {
       textResponse('新会话回复'),
       textResponse('重启后继续新会话'),
     ])
-    let stored: { meta: SessionHeader; events: SessionEvent[] } | undefined
-    const persistence = {
-      list: async () => stored === undefined ? [] : [structuredClone(stored.meta)],
-      inspect: async () => {
-        if (stored === undefined) throw new Error('rotated session has not been stored')
-        return structuredClone(stored)
-      },
-      prepare: async (id: SessionId) => {
-        if (stored === undefined) throw new Error('rotated session has not been stored')
-        return SessionPreparation.create(Session.fromRestore(
-          id,
-          structuredClone(stored.events),
-          structuredClone(stored.meta),
-        ))
-      },
-    }
-    const { ctx } = await toolHarness(adapter, persistence)
+    const { ctx } = await toolHarness(adapter)
     const message = {
       from_user_id: 'new-session-user',
       item_list: [{ type: MessageItemType.TEXT, text_item: { text: 'hello' } }],
@@ -229,11 +229,11 @@ describe('ConversationManager real Agent Loop', () => {
         .resolves.toEqual({ text: '旧会话回复', images: [], files: [] })
       const oldAgent = ctx.agents.get(baseId)
       if (oldAgent === undefined) throw new Error('expected the original Agent before /new')
-      const oldEvents = structuredClone([...oldAgent.session.events])
+      const oldEvents = structuredClone([...(await readSessionEvents(ctx, oldAgent.session.id))])
 
       await expect(first.startNewConversation(message)).resolves.toBeUndefined()
       expect(ctx.agents.get(baseId)).toBeUndefined()
-      expect(oldAgent.session.events).toEqual(oldEvents)
+      expect((await readSessionEvents(ctx, oldAgent.session.id))).toEqual(oldEvents)
       expect(ctx.agents.get(rotatedId)).toBeDefined()
       expect(adapter.requests).toHaveLength(1)
 
@@ -242,10 +242,7 @@ describe('ConversationManager real Agent Loop', () => {
       const rotated = ctx.agents.get(rotatedId)
       if (rotated === undefined) throw new Error('expected the rotated Agent')
       expect(rotated.session.header.agentPreset).toBe('standard')
-      stored = {
-        meta: structuredClone(rotated.session.header),
-        events: structuredClone([...rotated.session.events]),
-      }
+      await ctx.sessionPersistence.flush()
       await first.dispose()
       expect(ctx.agents.get(rotatedId)).toBeUndefined()
 
@@ -268,7 +265,7 @@ describe('ConversationManager real Agent Loop', () => {
       toolCallResponse(),
       textResponse('当前文件：README.md'),
     ])
-    const { ctx, executionCount } = await toolHarness(adapter, { list: () => Promise.resolve([]) })
+    const { ctx, executionCount } = await toolHarness(adapter)
 
     const message = {
       from_user_id: 'tool-user',
@@ -281,7 +278,7 @@ describe('ConversationManager real Agent Loop', () => {
       const id = SessionId(sessionIdFor('account-1', message))
       const agent = ctx.agents.get(id)
       if (agent === undefined) throw new Error('expected a live integration-test Agent')
-      const events = agent.session.events
+      const events = (await readSessionEvents(ctx, agent.session.id))
 
       expect(reply).toEqual({ text: '当前文件：README.md', images: [], files: [] })
       expect(executionCount()).toBe(1)
@@ -319,21 +316,7 @@ describe('ConversationManager real Agent Loop', () => {
       toolCallResponse(),
       textResponse('恢复后工具回复'),
     ])
-    let stored: { meta: SessionHeader; events: SessionEvent[] } | undefined
-    const inspect = vi.fn(async () => {
-      if (stored === undefined) throw new Error('session has not been persisted')
-      return structuredClone(stored)
-    })
-    const persistence = {
-      list: async () => stored === undefined ? [] : [structuredClone(stored.meta)],
-      inspect,
-      prepare: async (id: SessionId) => {
-        if (stored === undefined) throw new Error('session has not been persisted')
-        const snapshot = structuredClone(stored)
-        return SessionPreparation.create(Session.fromRestore(id, snapshot.events, snapshot.meta))
-      },
-    }
-    const { ctx, mount, executionCount } = await toolHarness(adapter, persistence)
+    const { ctx, mount, executionCount } = await toolHarness(adapter)
     const message = {
       from_user_id: 'resume-tool-user',
       item_list: [{ type: MessageItemType.TEXT, text_item: { text: '我当前有啥文件？' } }],
@@ -347,10 +330,7 @@ describe('ConversationManager real Agent Loop', () => {
         .resolves.toEqual({ text: '首次工具回复', images: [], files: [] })
       const original = ctx.agents.get(id)
       if (original === undefined) throw new Error('expected the original live Agent')
-      stored = {
-        meta: structuredClone(original.session.header),
-        events: structuredClone([...original.session.events]),
-      }
+      await ctx.sessionPersistence.flush()
       await first.dispose()
       expect(ctx.agents.get(id)).toBeUndefined()
 
@@ -361,12 +341,12 @@ describe('ConversationManager real Agent Loop', () => {
 
       const restored = ctx.agents.get(id)
       if (restored === undefined) throw new Error('expected the resumed live Agent')
-      expect(inspect).toHaveBeenCalledWith(id)
+      expect(await ctx.sessionPersistence.stat(id)).toBeDefined()
       expect(restored.session.header.agentPreset).toBe('standard')
       expect(mount.mock.calls.map(call => call[1])).toEqual(['standard', 'standard'])
       expect(executionCount()).toBe(2)
-      expect(restored.session.events.filter(event => event.type === 'tool/call')).toHaveLength(2)
-      expect(restored.session.events.filter(event => event.type === 'tool/result')).toHaveLength(2)
+      expect((await readSessionEvents(ctx, restored.session.id)).filter(event => event.type === 'tool/call')).toHaveLength(2)
+      expect((await readSessionEvents(ctx, restored.session.id)).filter(event => event.type === 'tool/result')).toHaveLength(2)
       expect(adapter.requests).toHaveLength(4)
     } finally {
       await resumed?.dispose()
@@ -380,7 +360,7 @@ describe('ConversationManager real Agent Loop', () => {
       approvalToolCallResponse(),
       textResponse('审批后文件：README.md'),
     ])
-    const { ctx, executionCount } = await toolHarness(adapter, { list: () => Promise.resolve([]) })
+    const { ctx, executionCount } = await toolHarness(adapter)
     const message = {
       from_user_id: 'approval-tool-user',
       item_list: [{ type: MessageItemType.TEXT, text_item: { text: '我当前有啥文件？' } }],
@@ -412,15 +392,15 @@ describe('ConversationManager real Agent Loop', () => {
       const agent = ctx.agents.get(SessionId(sessionIdFor('account-1', message)))
       if (agent === undefined) throw new Error('expected a live approval integration-test Agent')
       expect(executionCount()).toBe(1)
-      expect(agent.session.events.some(event => event.type === 'approval/asked')).toBe(true)
-      expect(agent.session.events.some(event => event.type === 'approval/decided'
+      expect((await readSessionEvents(ctx, agent.session.id)).some(event => event.type === 'approval/asked')).toBe(true)
+      expect((await readSessionEvents(ctx, agent.session.id)).some(event => event.type === 'approval/decided'
         && event.data.outcome === 'allowed-once')).toBe(true)
-      expect(agent.session.events.some(event => event.type === 'tool/call'
+      expect((await readSessionEvents(ctx, agent.session.id)).some(event => event.type === 'tool/call'
         && event.data.callId === CallId('call-approved-bash')
         && event.data.name === 'bash')).toBe(true)
-      expect(agent.session.events.some(event => event.type === 'tool/result'
+      expect((await readSessionEvents(ctx, agent.session.id)).some(event => event.type === 'tool/result'
         && event.data.message.source.callId === CallId('call-approved-bash'))).toBe(true)
-      expect(agent.session.events.some(event => event.type === 'turn/end'
+      expect((await readSessionEvents(ctx, agent.session.id)).some(event => event.type === 'turn/end'
         && event.data.reason.kind === 'completed')).toBe(true)
     } finally {
       await manager.dispose()

@@ -17,7 +17,7 @@ import {
   truncateUtf8,
   waitForLoginFromControlSocket,
   withTimeout
-} from "./chunk-KCZ7FGE3.js";
+} from "./chunk-KXS44R2N.js";
 
 // src/bridge.ts
 import { createHash } from "crypto";
@@ -25,6 +25,19 @@ import { homedir } from "os";
 import { isAbsolute as isAbsolute2, join as join2 } from "path";
 import { parseCommand as parseCommand2 } from "@deepseek-ai/dsh-commands";
 import { credentialRef } from "@deepseek-ai/dsh-credentials";
+
+// src/session-read.ts
+async function inspectSession(ctx, id) {
+  const observation = await ctx.sessionQuery.observeSession(id, { projectionMode: "none" });
+  try {
+    return { meta: observation.header, events: [...observation.events] };
+  } finally {
+    observation[Symbol.dispose]();
+  }
+}
+async function readSessionEvents(ctx, id) {
+  return (await inspectSession(ctx, id)).events;
+}
 
 // src/approvals.ts
 import { randomInt } from "crypto";
@@ -39,10 +52,12 @@ function parseApprovalCommand(text) {
   };
 }
 var WeixinApprovalRegistry = class {
-  constructor(timeoutMs) {
+  constructor(timeoutMs, context) {
     this.timeoutMs = timeoutMs;
+    this.context = context;
   }
   timeoutMs;
+  context;
   pending = /* @__PURE__ */ new Map();
   /** Ask one Weixin user and await a one-shot Harness approval outcome. */
   async request(conversationId, request, sendPrompt) {
@@ -73,7 +88,12 @@ var WeixinApprovalRegistry = class {
     timer = setTimeout(() => pending.finish("unavailable"), this.timeoutMs);
     request.signal?.addEventListener("abort", onAbort, { once: true });
     try {
-      await sendPrompt(formatApprovalPrompt(request, code, this.timeoutMs));
+      const rendered = await Promise.race([
+        formatApprovalPrompt(request, code, this.timeoutMs, this.context).then((text) => ({ text })),
+        decision.promise.then((outcome) => ({ outcome }))
+      ]);
+      if ("outcome" in rendered) return rendered.outcome;
+      if (!settled) await sendPrompt(rendered.text);
     } catch {
       pending.finish("unavailable");
     }
@@ -110,17 +130,17 @@ var WeixinApprovalRegistry = class {
     throw new Error("weixin-channel: could not allocate a unique approval code");
   }
 };
-function formatApprovalPrompt(request, code, timeoutMs) {
+async function formatApprovalPrompt(request, code, timeoutMs, context) {
   const toolName = request.toolName.toLowerCase() === "bash" ? "Bash" : request.toolName;
-  const detail = approvalDetail(request);
+  const detail = await approvalDetail(request, context);
   return [
     `${toolName} \u8BF7\u6C42\u6267\u884C\uFF1A${detail}`,
     `\u56DE\u590D /approve ${code} \u6216 /reject ${code}`,
     `\u8BE5\u5BA1\u6279\u5C06\u5728 ${Math.ceil(timeoutMs / 1e3)} \u79D2\u540E\u5931\u6548\u3002`
   ].join("\n");
 }
-function approvalDetail(request) {
-  const call = request.callId === void 0 ? void 0 : [...request.agent.session.events].reverse().find((event) => event.type === "tool/call" && event.data.callId === request.callId);
+async function approvalDetail(request, context) {
+  const call = request.callId === void 0 ? void 0 : [...await readSessionEvents(context ?? request.agent.ctx, request.agent.session.id)].reverse().find((event) => event.type === "tool/call" && event.data.callId === request.callId);
   if (call?.type === "tool/call") {
     try {
       const parsed = JSON.parse(call.data.arguments);
@@ -140,8 +160,16 @@ function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// src/session-preset.ts
+function resolveSessionPreset(session) {
+  let preset = session.header.agentPreset;
+  for (const event of session.events) {
+    if (event.type === "agent-preset/selected") preset = event.data.agentPreset;
+  }
+  return preset;
+}
+
 // src/conversations.ts
-import { resolveSessionPreset } from "@deepseek-ai/dsh-agent-presets";
 import { parseCommand } from "@deepseek-ai/dsh-commands";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import { SessionId } from "@deepseek-ai/dsh-session";
@@ -439,7 +467,7 @@ var ConversationManager = class {
     this.ctx = ctx;
     this.config = config;
     this.accountId = accountId;
-    this.approvals = new WeixinApprovalRegistry(config.approvalTimeoutMs);
+    this.approvals = new WeixinApprovalRegistry(config.approvalTimeoutMs, ctx);
   }
   ctx;
   config;
@@ -457,7 +485,7 @@ var ConversationManager = class {
       this.ctx.permissionPresets.resolve(this.config.permissionPreset);
     }
     const headers = await this.ctx.sessionPersistence.list();
-    this.persistedIds = new Set(headers.map((header) => String(header.id)));
+    this.persistedIds = new Set(headers.map((header) => String(header.header.id)));
   }
   /** Process one inbound message after earlier work for the same Weixin user. */
   process(message, api, sendApprovalPrompt) {
@@ -534,7 +562,7 @@ var ConversationManager = class {
       agent.session.header?.cwd ?? this.config.cwd
     );
     await withTimeout(agent.whenIdle(), this.config.responseTimeoutMs, "DeepSeek Harness conversation availability");
-    const start = agent.session.events.length;
+    const start = agent.session.seq;
     const userMessage = createUserMessage({ content, source: { kind: "user" } });
     const sendPrompt = sendApprovalPrompt ?? ((text) => {
       const to = message.from_user_id?.trim();
@@ -554,7 +582,7 @@ var ConversationManager = class {
         agent.cancel({ kind: "user" });
         throw error;
       }
-      return this.collectReply(agent, agent.session.events.slice(start), userMessage.id);
+      return this.collectReply(agent, (await readSessionEvents(this.ctx, agent.session.id)).slice(start), userMessage.id);
     } finally {
       stopApprovalAnswerer();
     }
@@ -567,7 +595,7 @@ var ConversationManager = class {
     if (parsed === void 0) {
       return { kind: "unknown", available: this.ctx.commands.list(agent).map((command) => `/${command.name}`) };
     }
-    const start = agent.session.events.length;
+    const start = agent.session.seq;
     const sendPrompt = sendApprovalPrompt ?? ((text) => {
       const to = message.from_user_id?.trim();
       if (!to) return Promise.reject(new Error("Weixin approval has no target user"));
@@ -583,7 +611,7 @@ var ConversationManager = class {
       controller.abort(new Error(`DeepSeek Harness command timed out after ${this.config.responseTimeoutMs}ms`));
     }, this.config.responseTimeoutMs);
     try {
-      const execution = await this.ctx.commands.execute(agent, line, controller.signal);
+      const execution = await this.ctx.commands.execute(agent, line, [], controller.signal);
       if (execution === void 0) {
         return { kind: "unknown", available: this.ctx.commands.list(agent).map((command) => `/${command.name}`) };
       }
@@ -594,7 +622,7 @@ var ConversationManager = class {
         agent.cancel({ kind: "user" });
         throw error;
       }
-      const generated = await this.collectLatestReply(agent, agent.session.events.slice(start));
+      const generated = await this.collectLatestReply(agent, (await readSessionEvents(this.ctx, agent.session.id)).slice(start));
       const resultText = execution.result.kind === "error" ? `\u547D\u4EE4\u6267\u884C\u5931\u8D25\uFF1A${execution.result.text}` : execution.result.text?.trim() || `\u547D\u4EE4 /${parsed.name} \u5DF2\u6267\u884C\u3002`;
       return {
         kind: "handled",
@@ -692,7 +720,7 @@ var ConversationManager = class {
     const current = this.ctx.agentDefaultModel.currentSelection();
     const agentOptions = { provider: current.provider, model: current.model };
     if (this.persistedIds.has(id)) {
-      const inspected = await this.ctx.sessionPersistence.inspect(sessionId);
+      const inspected = await inspectSession(this.ctx, sessionId);
       const agentPreset2 = resolveSessionPreset({
         header: inspected.meta,
         events: inspected.events
@@ -701,7 +729,7 @@ var ConversationManager = class {
         return this.ownAgent(await this.ctx.agents.resume({
           resumeSessionId: sessionId,
           agentOptions,
-          setup: (agentCtx) => this.setupAgent(agentCtx, agentPreset2)
+          setup: (agentCtx, agent) => this.setupAgent(agentCtx, agentPreset2, agent)
         }));
       } catch (error) {
         const raced = this.ctx.agents.get(sessionId);
@@ -716,7 +744,7 @@ var ConversationManager = class {
         sessionId,
         meta: { cwd: this.config.cwd, agentPreset },
         agentOptions,
-        setup: (agentCtx) => this.setupAgent(agentCtx, agentPreset, this.config.permissionPreset)
+        setup: (agentCtx, agent) => this.setupAgent(agentCtx, agentPreset, agent, this.config.permissionPreset)
       });
     } catch (error) {
       const raced = this.ctx.agents.get(sessionId);
@@ -726,7 +754,7 @@ var ConversationManager = class {
     this.persistedIds.add(id);
     handle.agent.inject(createUserMessage({
       content: [{ type: "text", text: this.config.systemPrompt }],
-      source: { kind: "plugin", plugin: "deepseek-harness-weixin", form: "instructions" }
+      source: { kind: "deepseek-harness-weixin", form: "instructions" }
     }));
     return this.ownAgent(handle);
   }
@@ -739,11 +767,9 @@ var ConversationManager = class {
   resolveAgentPreset() {
     return this.config.agentPreset ?? this.ctx.agentPresets.defaultId;
   }
-  async setupAgent(agentCtx, agentPreset, permissionPreset) {
+  async setupAgent(agentCtx, agentPreset, agent, permissionPreset) {
     await this.ctx.agentPresets.mount(agentCtx, agentPreset);
     if (permissionPreset !== void 0) {
-      const agent = agentCtx.agent;
-      if (agent === void 0) throw new Error("weixin-channel: Agent setup context has no Agent");
       this.ctx.permissionPresets.set(agent.session, permissionPreset);
     }
   }
@@ -1769,7 +1795,8 @@ var inject = [
   "credentials",
   "llm",
   "permissionPresets",
-  "sessionPersistence"
+  "sessionPersistence",
+  "sessionQuery"
 ];
 function mountBridge(ctx, bridge, control) {
   ctx.effect(() => {

@@ -29,7 +29,7 @@ The official ClawBot/iLink integration currently supports private chats only.
 
 - Node.js 22.19 or later
 - pnpm 10.33.4
-- DeepSeek Harness 0.1.0-rc.7 or later
+- DeepSeek Harness 0.2.1-rc.2 or later
 
 ## Prerequisite: ClawBot access
 
@@ -46,7 +46,7 @@ Tencent is rolling this feature out gradually. If the entry is absent, there is 
 Install directly from GitHub into the `web` profile (the commands below assume that `dsh` is on the global `PATH`):
 
 ```sh
-dsh plugin --profile web add github:sliverp/DeepSeek-harness-weixin
+dsh plugin --profile web add github:xl370869-art/DeepSeek-harness-weixin#v0.2.6-dsh.1
 ```
 
 Installation only updates the profile. Start the service with the command below, or restart it if it is already running:

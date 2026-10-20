@@ -72,7 +72,7 @@ describe('standalone Weixin login', () => {
     expect((await stat(dshHome)).mode & 0o777).toBe(0o700)
     expect((await stat(filename)).mode & 0o777).toBe(0o600)
     const entries = parseCredentialsDocument(await readFile(filename, 'utf8'), filename)
-    expect(JSON.parse(entries.get(CREDENTIAL_REF) ?? '')).toEqual(NEW_CREDENTIAL)
+    expect(JSON.parse(entries.refs.get(CREDENTIAL_REF) ?? '')).toEqual(NEW_CREDENTIAL)
     expect(status).toHaveBeenCalledWith('waiting')
   })
 
@@ -95,20 +95,32 @@ describe('standalone Weixin login', () => {
 
     const filename = join(dshHome, '.credentials.yaml')
     const entries = parseCredentialsDocument(await readFile(filename, 'utf8'), filename)
-    expect(JSON.parse(entries.get(CREDENTIAL_REF) ?? '')).toEqual(NEW_CREDENTIAL)
+    expect(JSON.parse(entries.refs.get(CREDENTIAL_REF) ?? '')).toEqual(NEW_CREDENTIAL)
   })
 
-  it('refuses to pretend it can overwrite a credential supplied by the process environment', async () => {
-    await temporaryDshHome()
+  it('persists a replacement ahead of the inherited environment with the latest provider', async () => {
+    const dshHome = await temporaryDshHome()
     vi.stubEnv(CREDENTIAL_REF, JSON.stringify(OLD_CREDENTIAL))
-    const login = vi.fn(async () => NEW_CREDENTIAL)
+    const login = vi.fn(async (options: { existingTokens?: string[] }) => {
+      expect(options.existingTokens).toEqual([OLD_CREDENTIAL.token])
+      return NEW_CREDENTIAL
+    })
 
     await expect(loginStandalone({
       credentialRef: CREDENTIAL_REF,
       timeoutMs: 300_000,
       showQr: vi.fn(async () => undefined),
       status: vi.fn(),
-    }, login as never)).rejects.toThrow('无法被登录命令覆盖')
-    expect(login).not.toHaveBeenCalled()
+    }, login as never)).resolves.toEqual(NEW_CREDENTIAL)
+    const filename = join(dshHome, '.credentials.yaml')
+    const entries = parseCredentialsDocument(await readFile(filename, 'utf8'), filename)
+    expect(JSON.parse(entries.refs.get(CREDENTIAL_REF) ?? '')).toEqual(NEW_CREDENTIAL)
+    // A second invocation must resolve the managed file ahead of the old environment.
+    const replacement = vi.fn(async (options: { existingTokens?: string[] }) => {
+      expect(options.existingTokens).toEqual([NEW_CREDENTIAL.token])
+      return NEW_CREDENTIAL
+    })
+    await loginStandalone({ credentialRef: CREDENTIAL_REF, timeoutMs: 300_000,
+      showQr: vi.fn(async () => undefined), status: vi.fn() }, replacement as never)
   })
 })

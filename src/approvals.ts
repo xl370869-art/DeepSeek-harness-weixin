@@ -1,3 +1,5 @@
+import type { Context } from '@deepseek-ai/cordis'
+import { readSessionEvents } from './session-read.js'
 import { randomInt } from 'node:crypto'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { truncateUtf8 } from './util.js'
@@ -38,7 +40,7 @@ export function parseApprovalCommand(text: string): ApprovalCommand | 'invalid' 
 export class WeixinApprovalRegistry {
   private readonly pending = new Map<string, PendingApproval>()
 
-  constructor(private readonly timeoutMs: number) {}
+  constructor(private readonly timeoutMs: number, private readonly context?: Context) {}
 
   /** Ask one Weixin user and await a one-shot Harness approval outcome. */
   async request(
@@ -72,7 +74,12 @@ export class WeixinApprovalRegistry {
     request.signal?.addEventListener('abort', onAbort, { once: true })
 
     try {
-      await sendPrompt(formatApprovalPrompt(request, code, this.timeoutMs))
+      const rendered = await Promise.race([
+        formatApprovalPrompt(request, code, this.timeoutMs, this.context).then(text => ({ text })),
+        decision.promise.then(outcome => ({ outcome })),
+      ])
+      if ('outcome' in rendered) return rendered.outcome
+      if (!settled) await sendPrompt(rendered.text)
     } catch {
       pending.finish('unavailable')
     }
@@ -118,9 +125,9 @@ export class WeixinApprovalRegistry {
 }
 
 /** Render the exact structured tool call linked by the approval request when available. */
-export function formatApprovalPrompt(request: ApprovalRequest, code: string, timeoutMs: number): string {
+export async function formatApprovalPrompt(request: ApprovalRequest, code: string, timeoutMs: number, context?: Context): Promise<string> {
   const toolName = request.toolName.toLowerCase() === 'bash' ? 'Bash' : request.toolName
-  const detail = approvalDetail(request)
+  const detail = await approvalDetail(request, context)
   return [
     `${toolName} 请求执行：${detail}`,
     `回复 /approve ${code} 或 /reject ${code}`,
@@ -128,10 +135,10 @@ export function formatApprovalPrompt(request: ApprovalRequest, code: string, tim
   ].join('\n')
 }
 
-function approvalDetail(request: ApprovalRequest): string {
+async function approvalDetail(request: ApprovalRequest, context?: Context): Promise<string> {
   const call = request.callId === undefined
     ? undefined
-    : [...request.agent.session.events].reverse().find(event => event.type === 'tool/call'
+    : [...await readSessionEvents(context ?? request.agent.ctx, request.agent.session.id)].reverse().find(event => event.type === 'tool/call'
         && event.data.callId === request.callId)
   if (call?.type === 'tool/call') {
     try {

@@ -91,7 +91,7 @@ function agentContext(replyText = 'model reply', includeToolStep = false, stallR
   const agent = {
     status: 'idle',
     options: { provider: 'deepseek', model: 'deepseek-chat' },
-    session: { events, header: { cwd: '/tmp/weixin-test' } },
+    session: { events, id: 'bridge-session', get seq() { return events.length }, header: { cwd: '/tmp/weixin-test' } },
     ctx: { on: vi.fn(() => vi.fn()) },
     inject: vi.fn(),
     followup: vi.fn((userMessage: { id: string }) => {
@@ -135,6 +135,9 @@ function agentContext(replyText = 'model reply', includeToolStep = false, stallR
       resolve: vi.fn(async () => ({ value: JSON.stringify(CREDENTIAL), source: 'test' })),
       set: vi.fn(async () => undefined),
     },
+    sessionQuery: { observeSession: vi.fn(async () => ({
+      header: {}, events: [...events], [Symbol.dispose]: vi.fn(),
+    })) },
     sessionPersistence: { list: vi.fn(async () => []) },
     commands: {
       execute: vi.fn(async () => undefined),
