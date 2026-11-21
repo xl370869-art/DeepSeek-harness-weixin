@@ -29,7 +29,7 @@
 
 - Node.js 22.19 或更高版本
 - pnpm 10.33.4
-- DeepSeek Harness 0.2.1-rc.2 或更高版本
+- DeepSeek Harness 0.2.2-rc.5 或更高版本
 
 ## 前置条件：ClawBot 权限
 

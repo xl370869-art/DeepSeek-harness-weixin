@@ -29,7 +29,7 @@ The official ClawBot/iLink integration currently supports private chats only.
 
 - Node.js 22.19 or later
 - pnpm 10.33.4
-- DeepSeek Harness 0.2.1-rc.2 or later
+- DeepSeek Harness 0.2.2-rc.5 or later
 
 ## Prerequisite: ClawBot access
 

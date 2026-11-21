@@ -1,3 +1,4 @@
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -21,13 +22,19 @@ import SessionStore, {
   SessionId,
 } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ConversationManager } from '../src/conversations.js'
 import { MessageItemType } from '../src/types.js'
 import { sessionIdFor } from '../src/util.js'
 import { testConfig } from './fixtures.js'
+
+const contentOutput = {
+  schema: { type: 'array', items: { type: 'json' } },
+  render: (_args: unknown, value: readonly unknown[]) => value as ContentBlock[],
+} as const
 
 class ObservedSessionQuery extends SessionQueryEngine {
   override async searchSessions(): Promise<never> { throw new Error('search is outside this test') }
@@ -118,6 +125,7 @@ async function toolHarness(adapter: ScriptedAdapter) {
   await ctx.plugin(CommandRuntime)
   await ctx.plugin(ApprovalService)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -125,7 +133,8 @@ async function toolHarness(adapter: ScriptedAdapter) {
   let executions = 0
   const mount = vi.fn(async (agentCtx: Context, agentPreset: string) => {
     expect(agentPreset).toBe('standard')
-    agentCtx.tools.register(defineContentToolFixture({
+    agentCtx.tools.register(defineTool({
+      output: contentOutput,
       name: 'list_files',
       description: 'List files for the integration test.',
       parameters: { path: { type: 'string', required: true } },
@@ -135,7 +144,8 @@ async function toolHarness(adapter: ScriptedAdapter) {
         return [{ type: 'text', text: 'README.md' }]
       },
     }))
-    agentCtx.tools.register(defineContentToolFixture({
+    agentCtx.tools.register(defineTool({
+      output: contentOutput,
       name: 'bash',
       description: 'Run a test command after Harness approval.',
       parameters: { command: { type: 'string', required: true } },
